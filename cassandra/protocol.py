@@ -23,7 +23,7 @@ import six
 from six.moves import range
 import io
 
-from cassandra import DriverException
+from cassandra import DriverException, ProtocolConstants
 from cassandra import (Unavailable, WriteTimeout, ReadTimeout,
                        WriteFailure, ReadFailure, FunctionFailure,
                        AlreadyExists, InvalidRequest, Unauthorized,
@@ -34,7 +34,6 @@ from cassandra.marshal import (int32_pack, int32_unpack, uint16_pack, uint16_unp
                                header_pack, uint32_pack)
 from cassandra.cqltypes import ListType, MapType, SetType, UserType, TupleType, CustomType
 
-from cassandra import WriteType
 from cassandra.cython_deps import HAVE_CYTHON, HAVE_NUMPY
 from cassandra import util
 
@@ -50,16 +49,6 @@ class InternalError(Exception):
 
 
 ColumnMetadata = namedtuple("ColumnMetadata", ['keyspace_name', 'table_name', 'name', 'type'])
-
-HEADER_DIRECTION_TO_CLIENT = 0x80
-HEADER_DIRECTION_MASK = 0x80
-
-COMPRESSED_FLAG = 0x01
-TRACING_FLAG = 0x02
-CUSTOM_PAYLOAD_FLAG = 0x04
-WARNING_FLAG = 0x08
-USE_BETA_FLAG = 0x10
-USE_BETA_MASK = ~USE_BETA_FLAG
 
 _UNSET_VALUE = object()
 
@@ -103,7 +92,7 @@ def _get_params(message_obj):
 
 
 class ErrorMessage(MessageBase, Exception):
-    opcode = 0x00
+    opcode = ProtocolConstants.Opcode.ERROR
     name = 'ERROR'
     summary = 'Unknown'
 
@@ -168,22 +157,22 @@ class RequestValidationException(ErrorMessageSub):
 
 class ServerError(ErrorMessageSub):
     summary = 'Server error'
-    error_code = 0x0000
+    error_code = ProtocolConstants.ErrorCode.SERVER_ERROR
 
 
 class ProtocolException(ErrorMessageSub):
     summary = 'Protocol error'
-    error_code = 0x000A
+    error_code = ProtocolConstants.ErrorCode.PROTOCOL_ERROR
 
 
 class BadCredentials(ErrorMessageSub):
     summary = 'Bad credentials'
-    error_code = 0x0100
+    error_code = ProtocolConstants.ErrorCode.AUTH_ERROR
 
 
 class UnavailableErrorMessage(RequestExecutionException):
     summary = 'Unavailable exception'
-    error_code = 0x1000
+    error_code = ProtocolConstants.ErrorCode.UNAVAILABLE
 
     class Codec(ErrorMessageSub.Codec):
         def decode_error_info(self, f, protocol_version):
@@ -199,22 +188,22 @@ class UnavailableErrorMessage(RequestExecutionException):
 
 class OverloadedErrorMessage(RequestExecutionException):
     summary = 'Coordinator node overloaded'
-    error_code = 0x1001
+    error_code = ProtocolConstants.ErrorCode.OVERLOADED
 
 
 class IsBootstrappingErrorMessage(RequestExecutionException):
     summary = 'Coordinator node is bootstrapping'
-    error_code = 0x1002
+    error_code = ProtocolConstants.ErrorCode.IS_BOOTSTRAPPING
 
 
 class TruncateError(RequestExecutionException):
     summary = 'Error during truncate'
-    error_code = 0x1003
+    error_code = ProtocolConstants.ErrorCode.TRUNCATE_ERROR
 
 
 class WriteTimeoutErrorMessage(RequestExecutionException):
     summary = "Coordinator node timed out waiting for replica nodes' responses"
-    error_code = 0x1100
+    error_code = ProtocolConstants.ErrorCode.WRITE_TIMEOUT
 
     class Codec(ErrorMessageSub.Codec):
         def decode_error_info(self, f, protocol_version):
@@ -222,7 +211,7 @@ class WriteTimeoutErrorMessage(RequestExecutionException):
                 'consistency': read_consistency_level(f),
                 'received_responses': read_int(f),
                 'required_responses': read_int(f),
-                'write_type': WriteType.name_to_value[read_string(f)],
+                'write_type': read_string(f),
             }
 
     def to_exception(self):
@@ -231,7 +220,7 @@ class WriteTimeoutErrorMessage(RequestExecutionException):
 
 class ReadTimeoutErrorMessage(RequestExecutionException):
     summary = "Coordinator node timed out waiting for replica nodes' responses"
-    error_code = 0x1200
+    error_code = ProtocolConstants.ErrorCode.READ_TIMEOUT
 
     class Codec(ErrorMessageSub.Codec):
 
@@ -249,7 +238,7 @@ class ReadTimeoutErrorMessage(RequestExecutionException):
 
 class ReadFailureMessage(RequestExecutionException):
     summary = "Replica(s) failed to execute read"
-    error_code = 0x1300
+    error_code = ProtocolConstants.ErrorCode.READ_FAILURE
 
     class Codec(ErrorMessageSub.Codec):
         protocol_version_registry = None
@@ -288,7 +277,7 @@ class ReadFailureMessage(RequestExecutionException):
 
 class FunctionFailureMessage(RequestExecutionException):
     summary = "User Defined Function failure"
-    error_code = 0x1400
+    error_code = ProtocolConstants.ErrorCode.FUNCTION_FAILURE
 
     class Codec(ErrorMessageSub.Codec):
 
@@ -305,7 +294,7 @@ class FunctionFailureMessage(RequestExecutionException):
 
 class WriteFailureMessage(RequestExecutionException):
     summary = "Replica(s) failed to execute write"
-    error_code = 0x1500
+    error_code = ProtocolConstants.ErrorCode.WRITE_FAILURE
 
     class Codec(ErrorMessageSub.Codec):
         protocol_version_registry = None
@@ -327,7 +316,7 @@ class WriteFailureMessage(RequestExecutionException):
                 error_code_map = None
                 failures = read_int(f)
 
-            write_type = WriteType.name_to_value[read_string(f)]
+            write_type = read_string(f)
 
             return {
                 'consistency': consistency,
@@ -344,17 +333,17 @@ class WriteFailureMessage(RequestExecutionException):
 
 class CDCWriteException(RequestExecutionException):
     summary = 'Failed to execute write due to CDC space exhaustion.'
-    error_code = 0x1600
+    error_code = ProtocolConstants.ErrorCode.CDC_WRITE_FAILURE
 
 
 class SyntaxException(RequestValidationException):
     summary = 'Syntax error in CQL query'
-    error_code = 0x2000
+    error_code = ProtocolConstants.ErrorCode.SYNTAX_ERROR
 
 
 class UnauthorizedErrorMessage(RequestValidationException):
     summary = 'Unauthorized'
-    error_code = 0x2100
+    error_code = ProtocolConstants.ErrorCode.UNAUTHORIZED
 
     def to_exception(self):
         return Unauthorized(self.summary_msg())
@@ -362,7 +351,7 @@ class UnauthorizedErrorMessage(RequestValidationException):
 
 class InvalidRequestException(RequestValidationException):
     summary = 'Invalid query'
-    error_code = 0x2200
+    error_code = ProtocolConstants.ErrorCode.INVALID
 
     def to_exception(self):
         return InvalidRequest(self.summary_msg())
@@ -370,12 +359,12 @@ class InvalidRequestException(RequestValidationException):
 
 class ConfigurationException(RequestValidationException):
     summary = 'Query invalid because of configuration issue'
-    error_code = 0x2300
+    error_code = ProtocolConstants.ErrorCode.CONFIG_ERROR
 
 
 class PreparedQueryNotFound(RequestValidationException):
     summary = 'Matching prepared statement not found on this node'
-    error_code = 0x2500
+    error_code = ProtocolConstants.ErrorCode.UNPREPARED
 
     class Codec(ErrorMessageSub.Codec):
 
@@ -386,7 +375,7 @@ class PreparedQueryNotFound(RequestValidationException):
 
 class AlreadyExistsException(ConfigurationException):
     summary = 'Item already exists'
-    error_code = 0x2400
+    error_code = ProtocolConstants.ErrorCode.ALREADY_EXISTS
 
     class Codec(ErrorMessageSub.Codec):
 
@@ -401,7 +390,7 @@ class AlreadyExistsException(ConfigurationException):
 
 
 class StartupMessage(MessageBase):
-    opcode = 0x01
+    opcode = ProtocolConstants.Opcode.STARTUP
     name = 'STARTUP'
 
     KNOWN_OPTION_KEYS = set((
@@ -423,7 +412,7 @@ class StartupMessage(MessageBase):
 
 
 class ReadyMessage(MessageBase):
-    opcode = 0x02
+    opcode = ProtocolConstants.Opcode.READY
     name = 'READY'
 
     class Codec(CodecBase):
@@ -433,7 +422,7 @@ class ReadyMessage(MessageBase):
 
 
 class AuthenticateMessage(MessageBase):
-    opcode = 0x03
+    opcode = ProtocolConstants.Opcode.AUTHENTICATE
     name = 'AUTHENTICATE'
 
     def __init__(self, authenticator):
@@ -447,7 +436,7 @@ class AuthenticateMessage(MessageBase):
 
 
 class AuthChallengeMessage(MessageBase):
-    opcode = 0x0E
+    opcode = ProtocolConstants.Opcode.AUTH_CHALLENGE
     name = 'AUTH_CHALLENGE'
 
     def __init__(self, challenge):
@@ -460,7 +449,7 @@ class AuthChallengeMessage(MessageBase):
 
 
 class AuthResponseMessage(MessageBase):
-    opcode = 0x0F
+    opcode = ProtocolConstants.Opcode.AUTH_RESPONSE
     name = 'AUTH_RESPONSE'
 
     def __init__(self, response):
@@ -473,7 +462,7 @@ class AuthResponseMessage(MessageBase):
 
 
 class AuthSuccessMessage(MessageBase):
-    opcode = 0x10
+    opcode = ProtocolConstants.Opcode.AUTH_SUCCESS
     name = 'AUTH_SUCCESS'
 
     def __init__(self, token):
@@ -486,7 +475,7 @@ class AuthSuccessMessage(MessageBase):
 
 
 class OptionsMessage(MessageBase):
-    opcode = 0x05
+    opcode = ProtocolConstants.Opcode.OPTIONS
     name = 'OPTIONS'
 
     class Codec(CodecBase):
@@ -496,7 +485,7 @@ class OptionsMessage(MessageBase):
 
 
 class SupportedMessage(MessageBase):
-    opcode = 0x06
+    opcode = ProtocolConstants.Opcode.SUPPORTED
     name = 'SUPPORTED'
 
     def __init__(self, cql_versions, options):
@@ -511,19 +500,8 @@ class SupportedMessage(MessageBase):
             return SupportedMessage(cql_versions=cql_versions, options=options)
 
 
-# used for QueryMessage and ExecuteMessage
-_VALUES_FLAG = 0x01
-_SKIP_METADATA_FLAG = 0x02
-_PAGE_SIZE_FLAG = 0x04
-_WITH_PAGING_STATE_FLAG = 0x08
-_WITH_SERIAL_CONSISTENCY_FLAG = 0x10
-_PROTOCOL_TIMESTAMP = 0x20
-_WITH_KEYSPACE_FLAG = 0x80
-_PREPARED_WITH_KEYSPACE_FLAG = 0x01
-
-
 class QueryMessage(MessageBase):
-    opcode = 0x07
+    opcode = ProtocolConstants.Opcode.QUERY
     name = 'QUERY'
 
     def __init__(self, query, consistency_level, serial_consistency_level=None,
@@ -549,24 +527,24 @@ class QueryMessage(MessageBase):
             write_consistency_level(f, message.consistency_level)
             flags = 0x00
             if message._query_params is not None:
-                flags |= _VALUES_FLAG  # also v2+, but we're only setting params internally right now
+                flags |= ProtocolConstants.QueryFlag.VALUES  # also v2+, but we're only setting params internally right now
 
             if message.serial_consistency_level:
-                flags |= _WITH_SERIAL_CONSISTENCY_FLAG
+                flags |= ProtocolConstants.QueryFlag.SERIAL_CONSISTENCY
 
             if message.fetch_size:
-                flags |= _PAGE_SIZE_FLAG
+                flags |= ProtocolConstants.QueryFlag.PAGE_SIZE
 
             if message.paging_state:
-                flags |= _WITH_PAGING_STATE_FLAG
+                flags |= ProtocolConstants.QueryFlag.PAGING_STATE
 
             if message.timestamp is not None:
-                flags |= _PROTOCOL_TIMESTAMP
+                flags |= ProtocolConstants.QueryFlag.DEFAULT_TIMESTAMP
 
             if message.keyspace is not None:
                 if self.protocol_version_registry.protocol_version. \
                         uses_keyspace_flag(protocol_version):
-                    flags |= _WITH_KEYSPACE_FLAG
+                    flags |= ProtocolConstants.QueryFlag.WITH_KEYSPACE
                 else:
                     raise UnsupportedOperation(
                         "Keyspaces may only be set on queries with protocol version "
@@ -595,15 +573,8 @@ class QueryMessage(MessageBase):
                 write_string(f, message.keyspace)
 
 
-RESULT_KIND_VOID = 0x0001
-RESULT_KIND_ROWS = 0x0002
-RESULT_KIND_SET_KEYSPACE = 0x0003
-RESULT_KIND_PREPARED = 0x0004
-RESULT_KIND_SCHEMA_CHANGE = 0x0005
-
-
 class ResultMessage(MessageBase):
-    opcode = 0x08
+    opcode = ProtocolConstants.Opcode.RESULT
     name = 'RESULT'
 
     kind = None
@@ -618,11 +589,6 @@ class ResultMessage(MessageBase):
 
     class Codec(CodecBase):
 
-        FLAGS_GLOBAL_TABLES_SPEC = 0x0001
-        HAS_MORE_PAGES_FLAG = 0x0002
-        NO_METADATA_FLAG = 0x0004
-        METADATA_ID_FLAG = 0x0008
-
         type_codes = None
 
         def __init__(self, context):
@@ -633,17 +599,17 @@ class ResultMessage(MessageBase):
             kind = read_int(f)
             paging_state = None
             col_types = None
-            if kind == RESULT_KIND_VOID:
+            if kind == ProtocolConstants.ResultKind.VOID:
                 results = None
-            elif kind == RESULT_KIND_ROWS:
+            elif kind == ProtocolConstants.ResultKind.ROWS:
                 paging_state, col_types, results, result_metadata_id = self.decode_results_rows(
                     f, protocol_version, user_type_map, result_metadata)
-            elif kind == RESULT_KIND_SET_KEYSPACE:
+            elif kind == ProtocolConstants.ResultKind.SET_KEYSPACE:
                 ksname = read_string(f)
                 results = ksname
-            elif kind == RESULT_KIND_PREPARED:
+            elif kind == ProtocolConstants.ResultKind.PREPARED:
                 results = self.decode_results_prepared(f, protocol_version, user_type_map)
-            elif kind == RESULT_KIND_SCHEMA_CHANGE:
+            elif kind == ProtocolConstants.ResultKind.SCHEMA_CHANGE:
                 results = self.decode_results_schema_change(f)
             else:
                 raise DriverException("Unknown RESULT kind: %d" % kind)
@@ -689,21 +655,21 @@ class ResultMessage(MessageBase):
             flags = read_int(f)
             colcount = read_int(f)
 
-            if flags & self.HAS_MORE_PAGES_FLAG:
+            if flags & ProtocolConstants.RowsFlag.HAS_MORE_PAGES:
                 paging_state = read_binary_longstring(f)
             else:
                 paging_state = None
 
-            if flags & self.METADATA_ID_FLAG:
+            if flags & ProtocolConstants.RowsFlag.METADATA_CHANGED:
                 result_metadata_id = read_binary_string(f)
             else:
                 result_metadata_id = None
 
-            no_meta = bool(flags & self.NO_METADATA_FLAG)
+            no_meta = bool(flags & ProtocolConstants.RowsFlag.NO_METADATA)
             if no_meta:
                 return paging_state, [], result_metadata_id
 
-            glob_tblspec = bool(flags & self.FLAGS_GLOBAL_TABLES_SPEC)
+            glob_tblspec = bool(flags & ProtocolConstants.RowsFlag.GLOBAL_TABLES_SPEC)
             if glob_tblspec:
                 ksname = read_string(f)
                 cfname = read_string(f)
@@ -728,7 +694,7 @@ class ResultMessage(MessageBase):
                 num_pk_indexes = read_int(f)
                 pk_indexes = [read_short(f) for _ in range(num_pk_indexes)]
 
-            glob_tblspec = bool(flags & self.FLAGS_GLOBAL_TABLES_SPEC)
+            glob_tblspec = bool(flags & ProtocolConstants.RowsFlag.GLOBAL_TABLES_SPEC)
             if glob_tblspec:
                 ksname = read_string(f)
                 cfname = read_string(f)
@@ -791,7 +757,7 @@ class ResultMessage(MessageBase):
 
 
 class PrepareMessage(MessageBase):
-    opcode = 0x09
+    opcode = ProtocolConstants.Opcode.PREPARE
     name = 'PREPARE'
 
     def __init__(self, query, keyspace=None):
@@ -813,7 +779,7 @@ class PrepareMessage(MessageBase):
             if message.keyspace is not None:
                 if self.protocol_version_registry.protocol_version. \
                         uses_keyspace_flag(protocol_version):
-                    flags |= _PREPARED_WITH_KEYSPACE_FLAG
+                    flags |= ProtocolConstants.PrepareFlag.WITH_KEYSPACE
                 else:
                     raise UnsupportedOperation(
                         "Keyspaces may only be set on queries with protocol version "
@@ -839,7 +805,7 @@ class PrepareMessage(MessageBase):
 
 
 class ExecuteMessage(MessageBase):
-    opcode = 0x0A
+    opcode = ProtocolConstants.Opcode.EXECUTE
     name = 'EXECUTE'
 
     def __init__(self, query_id, query_params, consistency_level,
@@ -869,17 +835,17 @@ class ExecuteMessage(MessageBase):
                     uses_prepared_metadata(protocol_version):
                 write_string(f, message.result_metadata_id)
             write_consistency_level(f, message.consistency_level)
-            flags = _VALUES_FLAG
+            flags = ProtocolConstants.QueryFlag.VALUES
             if message.serial_consistency_level:
-                flags |= _WITH_SERIAL_CONSISTENCY_FLAG
+                flags |= ProtocolConstants.QueryFlag.SERIAL_CONSISTENCY
             if message.fetch_size:
-                flags |= _PAGE_SIZE_FLAG
+                flags |= ProtocolConstants.QueryFlag.PAGE_SIZE
             if message.paging_state:
-                flags |= _WITH_PAGING_STATE_FLAG
+                flags |= ProtocolConstants.QueryFlag.PAGING_STATE
             if message.timestamp is not None:
-                flags |= _PROTOCOL_TIMESTAMP
+                flags |= ProtocolConstants.QueryFlag.DEFAULT_TIMESTAMP
             if message.skip_meta:
-                flags |= _SKIP_METADATA_FLAG
+                flags |= ProtocolConstants.QueryFlag.SKIP_METADATA
 
             if self.protocol_version_registry.protocol_version. \
                     uses_int_query_flags(protocol_version):
@@ -901,7 +867,7 @@ class ExecuteMessage(MessageBase):
 
 
 class BatchMessage(MessageBase):
-    opcode = 0x0D
+    opcode = ProtocolConstants.Opcode.BATCH
     name = 'BATCH'
 
     def __init__(self, batch_type, queries, consistency_level,
@@ -939,13 +905,13 @@ class BatchMessage(MessageBase):
             write_consistency_level(f, message.consistency_level)
             flags = 0
             if message.serial_consistency_level:
-                flags |= _WITH_SERIAL_CONSISTENCY_FLAG
+                flags |= ProtocolConstants.QueryFlag.SERIAL_CONSISTENCY
             if message.timestamp is not None:
-                flags |= _PROTOCOL_TIMESTAMP
+                flags |= ProtocolConstants.QueryFlag.DEFAULT_TIMESTAMP
             if message.keyspace:
                 if self.protocol_version_registry.protocol_version. \
                         uses_keyspace_flag(protocol_version):
-                    flags |= _WITH_KEYSPACE_FLAG
+                    flags |= ProtocolConstants.QueryFlag.WITH_KEYSPACE
                 else:
                     raise UnsupportedOperation(
                         "Keyspaces may only be set on queries with protocol version "
@@ -969,14 +935,14 @@ class BatchMessage(MessageBase):
 
 
 known_event_types = frozenset((
-    'TOPOLOGY_CHANGE',
-    'STATUS_CHANGE',
-    'SCHEMA_CHANGE'
+    ProtocolConstants.EventType.TOPOLOGY_CHANGE,
+    ProtocolConstants.EventType.STATUS_CHANGE,
+    ProtocolConstants.EventType.SCHEMA_CHANGE
 ))
 
 
 class RegisterMessage(MessageBase):
-    opcode = 0x0B
+    opcode = ProtocolConstants.Opcode.REGISTER
     name = 'REGISTER'
 
     def __init__(self, event_list):
@@ -989,7 +955,7 @@ class RegisterMessage(MessageBase):
 
 
 class EventMessage(MessageBase):
-    opcode = 0x0C
+    opcode = ProtocolConstants.Opcode.EVENT
     name = 'EVENT'
 
     def __init__(self, event_type, event_args):
@@ -1078,7 +1044,7 @@ class _ProtocolHandler(object):
         if msg.custom_payload:
             if protocol_version < 4:
                 raise UnsupportedOperation("Custom key/value payloads can only be used with protocol version 4 or higher")
-            flags |= CUSTOM_PAYLOAD_FLAG
+            flags |= ProtocolConstants.FrameFlag.CUSTOM_PAYLOAD
             write_bytesmap(body, msg.custom_payload)
 
         try:
@@ -1091,13 +1057,13 @@ class _ProtocolHandler(object):
 
         if compressor and len(body) > 0:
             body = compressor(body)
-            flags |= COMPRESSED_FLAG
+            flags |= ProtocolConstants.FrameFlag.COMPRESSED
 
         if msg.tracing:
-            flags |= TRACING_FLAG
+            flags |= ProtocolConstants.FrameFlag.TRACING
 
         if allow_beta_protocol_version:
-            flags |= USE_BETA_FLAG
+            flags |= ProtocolConstants.FrameFlag.USE_BETA
 
         buff = io.BytesIO()
         self._write_header(buff, protocol_version, flags, stream_id, msg.opcode, len(body))
@@ -1127,32 +1093,32 @@ class _ProtocolHandler(object):
         :param decompressor: optional decompression function to inflate the body
         :return: a message decoded from the body and frame attributes
         """
-        if flags & COMPRESSED_FLAG:
+        if flags & ProtocolConstants.FrameFlag.COMPRESSED:
             if decompressor is None:
                 raise RuntimeError("No de-compressor available for compressed frame!")
             body = decompressor(body)
-            flags ^= COMPRESSED_FLAG
+            flags ^= ProtocolConstants.FrameFlag.COMPRESSED
 
         body = io.BytesIO(body)
-        if flags & TRACING_FLAG:
+        if flags & ProtocolConstants.FrameFlag.TRACING:
             trace_id = UUID(bytes=body.read(16))
-            flags ^= TRACING_FLAG
+            flags ^= ProtocolConstants.FrameFlag.TRACING
         else:
             trace_id = None
 
-        if flags & WARNING_FLAG:
+        if flags & ProtocolConstants.FrameFlag.WARNING:
             warnings = read_stringlist(body)
-            flags ^= WARNING_FLAG
+            flags ^= ProtocolConstants.FrameFlag.WARNING
         else:
             warnings = None
 
-        if flags & CUSTOM_PAYLOAD_FLAG:
+        if flags & ProtocolConstants.FrameFlag.CUSTOM_PAYLOAD:
             custom_payload = read_bytesmap(body)
-            flags ^= CUSTOM_PAYLOAD_FLAG
+            flags ^= ProtocolConstants.FrameFlag.CUSTOM_PAYLOAD
         else:
             custom_payload = None
 
-        flags &= USE_BETA_MASK # will only be set if we asserted it in connection estabishment
+        flags &= ~ProtocolConstants.FrameFlag.USE_BETA # will only be set if we asserted it in connection estabishment
 
         if flags:
             log.warning("Unknown protocol flags set: %02x. May cause problems.", flags)
