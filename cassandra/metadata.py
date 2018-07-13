@@ -639,6 +639,14 @@ class KeyspaceMetadata(object):
     A dict mapping view names to :class:`.MaterializedViewMetadata` instances.
     """
 
+    virtual = False
+    """
+    A boolean indicating if this is a virtual table or not. Always ``False``
+    for clusters running pre-4.0 versions of Cassandra.
+
+    .. versionadded:: 3.15
+    """
+
     _exc_info = None
     """ set if metadata parsing failed """
 
@@ -2245,7 +2253,7 @@ class SchemaParserV3(SchemaParserV22):
                          aggregate_row['argument_types'], aggregate_row['state_func'], aggregate_row['state_type'],
                          aggregate_row['final_func'], aggregate_row['initcond'], aggregate_row['return_type'])
 
-    def _build_table_metadata(self, row, col_rows=None, trigger_rows=None, index_rows=None):
+    def _build_table_metadata(self, row, col_rows=None, trigger_rows=None, index_rows=None, virtual=False):
         keyspace_name = row["keyspace_name"]
         table_name = row[self._table_name_col]
 
@@ -2261,12 +2269,16 @@ class SchemaParserV3(SchemaParserV22):
                 compact_static = False
                 table_meta.is_compact_storage = 'dense' in flags or 'super' in flags or 'compound' not in flags
                 is_dense = 'dense' in flags
+            if virtual:
+                compact_static = False
+                table_meta.is_compact_storage = False
+                is_dense = False
             else:
                 compact_static = True
                 table_meta.is_compact_storage = True
                 is_dense = False
 
-            self._build_table_columns(table_meta, col_rows, compact_static, is_dense)
+            self._build_table_columns(table_meta, col_rows, compact_static, is_dense, virtual)
 
             for trigger_row in trigger_rows:
                 trigger_meta = self._build_trigger_metadata(table_meta, trigger_row)
@@ -2288,7 +2300,7 @@ class SchemaParserV3(SchemaParserV22):
         """ Setup the mostly-non-schema table options, like caching settings """
         return dict((o, row.get(o)) for o in self.recognized_table_options if o in row)
 
-    def _build_table_columns(self, meta, col_rows, compact_static=False, is_dense=False):
+    def _build_table_columns(self, meta, col_rows, compact_static=False, is_dense=False, virtual=False):
         # partition key
         partition_rows = [r for r in col_rows
                           if r.get('kind', None) == "partition_key"]
@@ -2431,6 +2443,122 @@ class SchemaParserV4(SchemaParserV3):
             'dclocal_read_repair_chance', 'read_repair_chance'
         )
     )
+
+    _SELECT_VIRTUAL_KEYSPACES = 'SELECT * from system_virtual_schema.keyspaces'
+    _SELECT_VIRTUAL_TABLES = 'SELECT * from system_virtual_schema.tables'
+    _SELECT_VIRTUAL_COLUMNS = 'SELECT * from system_virtual_schema.columns'
+
+    def __init__(self, connection, timeout):
+        super(SchemaParserV4, self).__init__(connection, timeout)
+        self.virtual_keyspaces_rows = defaultdict(list)
+        self.virtual_tables_rows = defaultdict(list)
+        self.virtual_columns_rows = defaultdict(lambda: defaultdict(list))
+
+    def _query_all(self):
+        cl = ConsistencyLevel.ONE
+        # todo: this duplicates V3; we should find a way for _query_all methods
+        # to extend each other.
+        queries = [
+            # copied from V3
+            QueryMessage(query=self._SELECT_KEYSPACES, consistency_level=cl),
+            QueryMessage(query=self._SELECT_TABLES, consistency_level=cl),
+            QueryMessage(query=self._SELECT_COLUMNS, consistency_level=cl),
+            QueryMessage(query=self._SELECT_TYPES, consistency_level=cl),
+            QueryMessage(query=self._SELECT_FUNCTIONS, consistency_level=cl),
+            QueryMessage(query=self._SELECT_AGGREGATES, consistency_level=cl),
+            QueryMessage(query=self._SELECT_TRIGGERS, consistency_level=cl),
+            QueryMessage(query=self._SELECT_INDEXES, consistency_level=cl),
+            QueryMessage(query=self._SELECT_VIEWS, consistency_level=cl),
+            # V4-only queries
+            QueryMessage(query=self._SELECT_VIRTUAL_KEYSPACES, consistency_level=cl),
+            QueryMessage(query=self._SELECT_VIRTUAL_TABLES, consistency_level=cl),
+            QueryMessage(query=self._SELECT_VIRTUAL_COLUMNS, consistency_level=cl)
+        ]
+
+        responses = self.connection.wait_for_responses(
+            *queries, timeout=self.timeout, fail_on_error=False)
+        (
+            # copied from V3
+            (ks_success, ks_result),
+            (table_success, table_result),
+            (col_success, col_result),
+            (types_success, types_result),
+            (functions_success, functions_result),
+            (aggregates_success, aggregates_result),
+            (triggers_success, triggers_result),
+            (indexes_success, indexes_result),
+            (views_success, views_result),
+            # V4-only responses
+            (virtual_ks_success, virtual_ks_result),
+            (virtual_table_success, virtual_table_result),
+            (virtual_column_success, virtual_column_result)
+        ) = responses
+
+        # copied from V3
+        self.keyspaces_result = self._handle_results(ks_success, ks_result)
+        self.tables_result = self._handle_results(table_success, table_result)
+        self.columns_result = self._handle_results(col_success, col_result)
+        self.triggers_result = self._handle_results(triggers_success, triggers_result)
+        self.types_result = self._handle_results(types_success, types_result)
+        self.functions_result = self._handle_results(functions_success, functions_result)
+        self.aggregates_result = self._handle_results(aggregates_success, aggregates_result)
+        self.indexes_result = self._handle_results(indexes_success, indexes_result)
+        self.views_result = self._handle_results(views_success, views_result)
+        # V4-only results
+        self.virtual_keyspaces_result = self._handle_results(virtual_ks_success,
+                                                             virtual_ks_result)
+        self.virtual_tables_result = self._handle_results(virtual_table_success,
+                                                          virtual_table_result)
+        self.virtual_columns_result = self._handle_results(virtual_column_success,
+                                                           virtual_column_result)
+        self._aggregate_results()
+
+    def _aggregate_results(self):
+        super(SchemaParserV4, self)._aggregate_results()
+
+        m = self.virtual_tables_rows
+        for row in self.virtual_tables_result:
+            m[row["keyspace_name"]].append(row)
+
+        m = self.virtual_columns_rows
+        for row in self.virtual_columns_result:
+            ks_name = row['keyspace_name']
+            tab_name = row[self._table_name_col]
+            m[ks_name][tab_name].append(row)
+
+    def get_all_keyspaces(self):
+        for x in super(SchemaParserV4, self).get_all_keyspaces():
+            yield x
+
+        for row in self.virtual_keyspaces_result:
+            ks_name = row['keyspace_name']
+            keyspace_meta = self._build_keyspace_metadata(row, virtual=True)
+            keyspace_meta.virtual = True
+
+            for table_row in self.virtual_tables_rows.get(ks_name, []):
+                table_name = table_row[self._table_name_col]
+
+                col_rows = self.virtual_columns_rows[ks_name][table_name]
+                keyspace_meta._add_table_metadata(
+                    self._build_table_metadata(table_row,
+                                               col_rows=col_rows,
+                                               virtual=True)
+                )
+            yield keyspace_meta
+
+    @classmethod
+    def _build_keyspace_metadata(cls, row, virtual=False):
+        if virtual:
+            return cls._build_virtual_keyspace_metadata_internal(row)
+        return cls._build_keyspace_metadata_internal(row)
+
+    @staticmethod
+    def _build_virtual_keyspace_metadata_internal(row):
+        name = row["keyspace_name"]
+        durable_writes = row.get("durable_writes", None)
+        strategy_options = dict(row.get("replication", {}))
+        strategy_class = strategy_options.pop("class", None)
+        return KeyspaceMetadata(name, durable_writes, strategy_class, strategy_options)
 
 
 class TableMetadataV3(TableMetadata):
