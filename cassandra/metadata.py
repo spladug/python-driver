@@ -641,7 +641,7 @@ class KeyspaceMetadata(object):
 
     virtual = False
     """
-    A boolean indicating if this is a virtual table or not. Always ``False``
+    A boolean indicating if this is a virtual keyspace or not. Always ``False``
     for clusters running pre-4.0 versions of Cassandra.
 
     .. versionadded:: 3.15
@@ -679,6 +679,11 @@ class KeyspaceMetadata(object):
                 ret += line
             ret += "\nApproximate structure, for reference:\n(this should not be used to reproduce this schema)\n\n%s\n*/" % cql
             return ret
+        if self.virtual:
+            return ("/*\nWarning: Keyspace {ks} is a virtual keyspace and cannot be recreated with CQL.\n"
+                    "Structure, for reference:*/\n"
+                    "{cql}\n"
+                    "").format(ks=self.name, cql=cql)
         return cql
 
     def as_cql_query(self):
@@ -686,6 +691,8 @@ class KeyspaceMetadata(object):
         Returns a CQL query string that can be used to recreate just this keyspace,
         not including user-defined types and tables.
         """
+        if self.virtual:
+            return "// VIRTUAL KEYSPACE {}".format(protect_name(self.name))
         ret = "CREATE KEYSPACE %s WITH replication = %s " % (
             protect_name(self.name),
             self.replication_strategy.export_for_schema())
@@ -1073,11 +1080,21 @@ class TableMetadata(object):
     _exc_info = None
     """ set if metadata parsing failed """
 
+    virtual = False
+    """
+    A boolean indicating if this is a virtual table or not. Always ``False``
+    for clusters running pre-4.0 versions of Cassandra.
+
+    .. versionadded:: 3.15
+    """
+
     @property
     def is_cql_compatible(self):
         """
         A boolean indicating if this table can be represented as CQL in export
         """
+        if self.virtual:
+            return False
         comparator = getattr(self, 'comparator', None)
         if comparator:
             # no compact storage with more than one column beyond PK if there
@@ -1094,7 +1111,7 @@ class TableMetadata(object):
     Metadata describing configuration for table extensions
     """
 
-    def __init__(self, keyspace_name, name, partition_key=None, clustering_key=None, columns=None, triggers=None, options=None):
+    def __init__(self, keyspace_name, name, partition_key=None, clustering_key=None, columns=None, triggers=None, options=None, virtual=False):
         self.keyspace_name = keyspace_name
         self.name = name
         self.partition_key = [] if partition_key is None else partition_key
@@ -1105,8 +1122,9 @@ class TableMetadata(object):
         self.comparator = None
         self.triggers = OrderedDict() if triggers is None else triggers
         self.views = {}
+        self.virtual = virtual
 
-    def export_as_string(self):
+    def export_as_string(self, virtual=False):
         """
         Returns a string of CQL queries that can be used to recreate this table
         along with all indexes on it.  The returned string is formatted to
@@ -1124,6 +1142,11 @@ class TableMetadata(object):
             ret = "/*\nWarning: Table %s.%s omitted because it has constructs not compatible with CQL (was created via legacy API).\n" % \
                   (self.keyspace_name, self.name)
             ret += "\nApproximate structure, for reference:\n(this should not be used to reproduce this schema)\n\n%s\n*/" % self._all_as_cql()
+        elif self.virtual:
+            ret = ('/*\nWarning: Table {ks}.{tab} is a virtual table and cannot be recreated with CQL.\n'
+                   'Structure, for reference:\n'
+                   '{cql}\n*/').format(ks=self.keyspace_name, tab=self.name, cql=self._all_as_cql())
+
         else:
             ret = self._all_as_cql()
 
@@ -1158,7 +1181,8 @@ class TableMetadata(object):
         creations are not included).  If `formatted` is set to :const:`True`,
         extra whitespace will be added to make the query human readable.
         """
-        ret = "CREATE TABLE %s.%s (%s" % (
+        ret = "%s TABLE %s.%s (%s" % (
+            ('VIRTUAL' if self.virtual else 'CREATE'),
             protect_name(self.keyspace_name),
             protect_name(self.name),
             "\n" if formatted else "")
@@ -2261,7 +2285,7 @@ class SchemaParserV3(SchemaParserV22):
         trigger_rows = trigger_rows or self.keyspace_table_trigger_rows[keyspace_name][table_name]
         index_rows = index_rows or self.keyspace_table_index_rows[keyspace_name][table_name]
 
-        table_meta = TableMetadataV3(keyspace_name, table_name)
+        table_meta = TableMetadataV3(keyspace_name, table_name, virtual=virtual)
         try:
             table_meta.options = self._build_table_options(row)
             flags = row.get('flags', set())
