@@ -2293,7 +2293,7 @@ class SchemaParserV3(SchemaParserV22):
                 compact_static = False
                 table_meta.is_compact_storage = 'dense' in flags or 'super' in flags or 'compound' not in flags
                 is_dense = 'dense' in flags
-            if virtual:
+            elif virtual:
                 compact_static = False
                 table_meta.is_compact_storage = False
                 is_dense = False
